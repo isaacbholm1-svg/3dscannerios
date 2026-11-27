@@ -104,6 +104,37 @@ struct RGBImage {
     }
 }
 
+/// How sharp a camera frame is: mean squared Laplacian of the luma plane over
+/// the central part of the image. Higher is sharper; blur from motion or
+/// focus hunting drops it a lot. Only meaningful relative to other frames.
+func frameSharpness(_ buffer: CVPixelBuffer) -> Float {
+    guard CVPixelBufferGetPlaneCount(buffer) >= 1 else { return 0 }
+    CVPixelBufferLockBaseAddress(buffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) else { return 0 }
+    let w = CVPixelBufferGetWidthOfPlane(buffer, 0)
+    let h = CVPixelBufferGetHeightOfPlane(buffer, 0)
+    let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+    let p = base.assumingMemoryBound(to: UInt8.self)
+    let x0 = w / 4, x1 = w * 3 / 4, y0 = h / 4, y1 = h * 3 / 4
+    var sum: Float = 0
+    var count: Float = 0
+    var y = y0
+    while y < y1 {
+        let row = p + y * stride
+        var x = x0
+        while x < x1 {
+            let c = Int(row[x])
+            let lap = 4 * c - Int(row[x - 1]) - Int(row[x + 1]) - Int(row[x - stride]) - Int(row[x + stride])
+            sum += Float(lap * lap)
+            count += 1
+            x += 3
+        }
+        y += 3
+    }
+    return count > 0 ? sum / count : 0
+}
+
 /// Reads colours straight from ARKit's YCbCr camera image.
 struct YCbCrImage {
     let luma: UnsafePointer<UInt8>

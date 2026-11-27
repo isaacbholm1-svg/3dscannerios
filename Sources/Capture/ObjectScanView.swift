@@ -9,12 +9,37 @@ enum PhotogrammetryRunner {
             throw ScanError("This device can't build models itself. Export the photos and build the model on a computer (for example Reality Composer Pro, RealityScan or Meshroom).")
         }
         var config = PhotogrammetrySession.Configuration()
+        // Photos come from a guided walk-around, so neighbours overlap: sequential
+        // ordering and high feature sensitivity give more matches on plain surfaces.
+        config.sampleOrdering = .sequential
+        config.featureSensitivity = .high
+        config.isObjectMaskingEnabled = true
         if let checkpoint {
             try? FileManager.default.createDirectory(at: checkpoint, withIntermediateDirectories: true)
             config.checkpointDirectory = checkpoint
         }
+        // Ask for the most detail the device will build, falling back step by step.
+        var lastError: Error?
+        for detail in [PhotogrammetrySession.Request.Detail.medium, .reduced] {
+            do {
+                try? FileManager.default.removeItem(at: output)
+                try await process(images: images, config: config, output: output, detail: detail, progress: progress)
+                return
+            } catch let error as ScanError {
+                throw error
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? ScanError("Couldn't build the model.")
+    }
+
+    @MainActor
+    private static func process(images: URL, config: PhotogrammetrySession.Configuration, output: URL,
+                                detail: PhotogrammetrySession.Request.Detail,
+                                progress: @escaping (Double) -> Void) async throws {
         let session = try PhotogrammetrySession(input: images, configuration: config)
-        try session.process(requests: [.modelFile(url: output, detail: .reduced)])
+        try session.process(requests: [.modelFile(url: output, detail: detail)])
         for try await output in session.outputs {
             switch output {
             case .requestProgress(_, let fraction):
@@ -90,6 +115,8 @@ final class ObjectScanModel: ObservableObject {
         let session = ObjectCaptureSession()
         var config = ObjectCaptureSession.Configuration()
         config.checkpointDirectory = checkpoint
+        // Keep extra shots beyond the minimum: more overlap means sharper, more complete models.
+        config.isOverCaptureEnabled = true
         session.start(imagesDirectory: images, configuration: config)
         self.session = session
 
@@ -218,17 +245,31 @@ struct ObjectScanView: View {
                 }
             case .capturing:
                 if model.passDone {
-                    Text("Pass complete! For a full model, flip the object over and scan its other side.")
-                        .font(.subheadline).multilineTextAlignment(.center)
-                    HStack {
-                        Button("Flip & scan") { model.newPass(flip: true) }
-                        Button("Scan again") { model.newPass(flip: false) }
+                    if model.passes < 3 {
+                        Text(model.passes == 1
+                             ? "Pass 1 done. Now go around again with the phone higher, looking down at the object."
+                             : "Pass 2 done. One more: go around low, looking slightly up. Or flip the object to capture its bottom.")
+                            .font(.subheadline).multilineTextAlignment(.center)
+                        Button("Next pass (\(model.passes + 1) of 3)") { model.newPass(flip: false) }
+                            .buttonStyle(.borderedProminent)
+                        HStack {
+                            Button("Flip & scan") { model.newPass(flip: true) }
+                            Button("Finish now") { model.session?.finish() }
+                        }
+                        .buttonStyle(.bordered)
+                    } else {
+                        Text("Great coverage. Flip the object for its underside, or build the model.")
+                            .font(.subheadline).multilineTextAlignment(.center)
+                        HStack {
+                            Button("Flip & scan") { model.newPass(flip: true) }
+                            Button("Scan again") { model.newPass(flip: false) }
+                        }
+                        .buttonStyle(.bordered)
+                        Button("Finish & build model") { model.session?.finish() }
+                            .buttonStyle(.borderedProminent)
                     }
-                    .buttonStyle(.bordered)
-                    Button("Finish & build model") { model.session?.finish() }
-                        .buttonStyle(.borderedProminent)
                 } else {
-                    Text("Walk slowly all the way around. Go low, at eye level, then high.")
+                    Text(passHint)
                         .font(.subheadline).multilineTextAlignment(.center)
                     Button("Finish early") { model.session?.finish() }
                         .buttonStyle(.bordered)
@@ -242,6 +283,14 @@ struct ObjectScanView: View {
                 Text(message).foregroundStyle(.red).multilineTextAlignment(.center)
                 Button("Close") { cancel() }.buttonStyle(.borderedProminent)
             }
+        }
+    }
+
+    private var passHint: String {
+        switch model.passes {
+        case 1: return "Pass 1: walk slowly all the way around at about the object's height. Keep it filling the frame."
+        case 2: return "Pass 2: go around again, holding the phone higher and looking down."
+        default: return "Walk slowly all the way around, low and looking slightly up."
         }
     }
 

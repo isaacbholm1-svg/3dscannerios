@@ -15,8 +15,8 @@ struct SpaceScanView: View {
 
     @StateObject private var capture = MeshCapture()
     @State private var stage = Stage.setup
-    @State private var ultra = false
-    @State private var removeUntextured = false
+    @State private var ultra = MeshCapture.supportsHighRes
+    @State private var removeUntextured = true
     @State private var scan: ScanRecord?
     @State private var errorText: String?
 

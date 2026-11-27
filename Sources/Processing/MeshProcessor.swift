@@ -22,7 +22,9 @@ enum MeshProcessor {
     static func run(mesh input: MeshData, keyframes: [Keyframe], folder: URL, datasetName: String,
                     options: MeshProcessingOptions,
                     progress: @escaping (String, Double) -> Void) throws -> ProcessedScan {
-        var mesh = input
+        progress("Cleaning up mesh", 0)
+        var mesh = MeshCleanup.weld(input, tolerance: 0.002)
+        MeshCleanup.taubinSmooth(&mesh, iterations: 3)
         let N = mesh.positions.count
         let T = mesh.indices.count / 3
         guard T > 0 else { throw ScanError("No surfaces were captured. Scan again and move around the space more.") }
@@ -47,8 +49,11 @@ enum MeshProcessor {
             faceCenter[t] = (a + b + c) / 3
         }
 
-        var bestScore = [Float](repeating: 0, count: T)
-        var bestFrame = [Int32](repeating: -1, count: T)
+        // Top 3 candidate photos per triangle, best first; smoothed into a final choice below.
+        let K = 3
+        var candScore = [Float](repeating: 0, count: T * K)
+        var candFrame = [Int32](repeating: -1, count: T * K)
+        let maxSharpness = max(keyframes.map(\.sharpness).max() ?? 1, 1e-6)
         var vertexColor = [SIMD3<Float>](repeating: SIMD3(repeating: 0.6), count: N)
         var vertexScore = [Float](repeating: 0, count: N)
         var uv = [SIMD2<Float>](repeating: .zero, count: N)
@@ -65,6 +70,8 @@ enum MeshProcessor {
                 let depth = kf.depth
                 let W = cam.width, H = cam.height
                 let margin: Float = 6
+                // Sharper photos win ties; a blurry one only wins if it's much closer or more head-on.
+                let sharpWeight = 0.35 + 0.65 * min(1, kf.sharpness / maxSharpness)
 
                 // 1. Which vertices this photo sees.
                 for v in 0..<N {
@@ -106,10 +113,17 @@ enum MeshProcessor {
                     let area = abs(e1.x * e2.y - e1.y * e2.x) * 0.5
                     let center = (uv[a] + uv[b] + uv[c]) / 3 - SIMD2(0.5, 0.5)
                     let edgeWeight = 1 - min(0.6, simd_length(center) * 0.9)
-                    let score = area * facing * edgeWeight
-                    if score > bestScore[t] {
-                        bestScore[t] = score
-                        bestFrame[t] = Int32(k)
+                    let score = area * facing * facing * edgeWeight * sharpWeight
+                    let base = t * K
+                    if score > candScore[base + K - 1] {
+                        var i = K - 1
+                        while i > 0 && score > candScore[base + i - 1] {
+                            candScore[base + i] = candScore[base + i - 1]
+                            candFrame[base + i] = candFrame[base + i - 1]
+                            i -= 1
+                        }
+                        candScore[base + i] = score
+                        candFrame[base + i] = Int32(k)
                     }
                 }
 
@@ -137,6 +151,12 @@ enum MeshProcessor {
                 }
             }
         }
+
+        // Pick each triangle's photo, preferring the one its neighbours use, so the
+        // texture comes from fewer, larger patches with far fewer visible seams.
+        progress("Reducing texture seams", 0.66)
+        let bestFrame = MeshCleanup.smoothLabels(indices: mesh.indices, vertexCount: N, candFrame: candFrame,
+                                                 candScore: candScore, k: K)
 
         // Group triangles by photo.
         progress("Writing textured model", 0.7)

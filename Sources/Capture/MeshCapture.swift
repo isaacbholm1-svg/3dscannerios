@@ -22,6 +22,8 @@ struct Keyframe {
     var depthTransform: simd_float4x4
     /// Intrinsics scaled to the depth map's resolution.
     var depthIntrinsics: simd_float3x3
+    /// Relative image sharpness (see frameSharpness).
+    var sharpness: Float = 1
 
     var imageCamera: PinholeCamera { PinholeCamera(transform: transform, intrinsics: intrinsics, width: width, height: height) }
     var depthCamera: PinholeCamera { PinholeCamera(transform: depthTransform, intrinsics: depthIntrinsics, width: depth.width, height: depth.height) }
@@ -52,6 +54,8 @@ final class MeshCapture: NSObject, ObservableObject, ARSessionDelegate {
     private var prevPose: simd_float4x4?
     private var prevTime: TimeInterval = 0
     private var lastStats: TimeInterval = 0
+    /// Sharpness of recent steady frames, to judge each candidate against.
+    private var recentSharpness: [Float] = []
 
     override init() {
         super.init()
@@ -72,6 +76,10 @@ final class MeshCapture: NSObject, ObservableObject, ARSessionDelegate {
             ? .meshWithClassification : .mesh
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics.insert(.sceneDepth)
+        }
+        // Temporally smoothed LiDAR depth: far less noise for occlusion tests and the point cloud.
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            config.frameSemantics.insert(.smoothedSceneDepth)
         }
         config.environmentTexturing = .none
         config.worldAlignment = .gravity
@@ -130,24 +138,34 @@ final class MeshCapture: NSObject, ObservableObject, ARSessionDelegate {
                 ? (keyframes.count >= Self.maxKeyframes ? "Photo limit reached. Tap Finish." : "Scanning. Cover every surface.")
                 : tracking
         }
-        tooFast = linear > 0.6 || angular > 1.0
+        tooFast = linear > 0.45 || angular > 0.7
 
+        // Only near-still frames can give sharp texture photos.
         guard accepting, !pendingHighRes, keyframes.count < Self.maxKeyframes,
               case .normal = frame.camera.trackingState,
-              now - lastKeyTime > 0.3,
-              linear < 0.45, angular < 0.7,
-              let depthData = frame.sceneDepth else { return }
+              now - lastKeyTime > 0.25,
+              linear < 0.3, angular < 0.45,
+              let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else { return }
         if let last = lastKeyPose {
             let moved = simd_distance(last.position, pose.position)
             let turned = rotationAngle(last, pose)
-            guard moved > 0.12 || turned > 0.18 else { return }
+            guard moved > 0.10 || turned > 0.15 else { return }
+        }
+        // Reject blurry frames: must be close to the sharpest recent steady frames.
+        let sharpness = frameSharpness(frame.capturedImage)
+        recentSharpness.append(sharpness)
+        if recentSharpness.count > 40 { recentSharpness.removeFirst() }
+        if recentSharpness.count >= 5 {
+            let sorted = recentSharpness.sorted()
+            let reference = sorted[sorted.count * 3 / 4]
+            guard sharpness >= reference * 0.7 else { return }
         }
         lastKeyPose = pose
         lastKeyTime = now
-        addKeyframe(frame: frame, depthData: depthData)
+        addKeyframe(frame: frame, depthData: depthData, sharpness: sharpness)
     }
 
-    private func addKeyframe(frame: ARFrame, depthData: ARDepthData) {
+    private func addKeyframe(frame: ARFrame, depthData: ARDepthData, sharpness: Float) {
         let depth = DepthSnapshot(depthData)
         let cam = frame.camera
         let w = Int(cam.imageResolution.width), h = Int(cam.imageResolution.height)
@@ -155,7 +173,8 @@ final class MeshCapture: NSObject, ObservableObject, ARSessionDelegate {
         let name = String(format: "kf_%04d.jpg", keyframes.count)
         let url = datasetFolder.appendingPathComponent(name)
         var keyframe = Keyframe(file: name, transform: cam.transform, intrinsics: cam.intrinsics, width: w, height: h,
-                                depth: depth, depthTransform: cam.transform, depthIntrinsics: depthK)
+                                depth: depth, depthTransform: cam.transform, depthIntrinsics: depthK,
+                                sharpness: sharpness)
 
         if highRes {
             pendingHighRes = true
