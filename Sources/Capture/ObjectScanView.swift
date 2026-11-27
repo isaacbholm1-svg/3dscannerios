@@ -18,20 +18,8 @@ enum PhotogrammetryRunner {
             try? FileManager.default.createDirectory(at: checkpoint, withIntermediateDirectories: true)
             config.checkpointDirectory = checkpoint
         }
-        // Ask for the most detail the device will build, falling back step by step.
-        var lastError: Error?
-        for detail in [PhotogrammetrySession.Request.Detail.medium, .reduced] {
-            do {
-                try? FileManager.default.removeItem(at: output)
-                try await process(images: images, config: config, output: output, detail: detail, progress: progress)
-                return
-            } catch let error as ScanError {
-                throw error
-            } catch {
-                lastError = error
-            }
-        }
-        throw lastError ?? ScanError("Couldn't build the model.")
+        // iOS only offers .reduced on device; the photos can be rebuilt at full detail on a Mac.
+        try await process(images: images, config: config, output: output, detail: .reduced, progress: progress)
     }
 
     @MainActor
