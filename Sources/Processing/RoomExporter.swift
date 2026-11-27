@@ -114,10 +114,13 @@ enum RoomExporter {
     }
 
     private static func footprint(_ o: CapturedRoom.Object) -> [SIMD2<Float>] {
-        let c = o.transform.position
-        let ax = o.transform.columns.0.xyz * (o.dimensions.x / 2)
-        let az = o.transform.columns.2.xyz * (o.dimensions.z / 2)
-        return [c - ax - az, c + ax - az, c + ax + az, c - ax + az].map { SIMD2($0.x, $0.z) }
+        let c: SIMD3<Float> = o.transform.position
+        let ax: SIMD3<Float> = o.transform.columns.0.xyz * (o.dimensions.x / 2)
+        let az: SIMD3<Float> = o.transform.columns.2.xyz * (o.dimensions.z / 2)
+        let back: SIMD3<Float> = c - az
+        let front: SIMD3<Float> = c + az
+        let corners: [SIMD3<Float>] = [back - ax, back + ax, front + ax, front - ax]
+        return corners.map { (p: SIMD3<Float>) -> SIMD2<Float> in SIMD2<Float>(p.x, p.z) }
     }
 
     // MARK: Drawing
